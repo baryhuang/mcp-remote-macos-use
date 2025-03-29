@@ -6,12 +6,22 @@ from unittest.mock import patch, MagicMock, AsyncMock
 # Add the source directory to the path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+# Import and configure asyncio for CI environment
+from tests.asyncio_config import configure_event_loop
+
+# Configure asyncio at the start of testing
+configure_event_loop()
+
 # Set environment variables for testing
 os.environ['MACOS_HOST'] = 'test-host'
 os.environ['MACOS_PORT'] = '5900'
 os.environ['MACOS_USERNAME'] = 'test-user'
 os.environ['MACOS_PASSWORD'] = 'test-password'
 os.environ['VNC_ENCRYPTION'] = 'prefer_on'
+
+# Let CI environments know they are running in CI
+if not os.environ.get('CI') and os.environ.get('GITHUB_ACTIONS'):
+    os.environ['CI'] = 'true'
 
 @pytest.fixture
 def mock_global_env_vars():
