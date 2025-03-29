@@ -1,0 +1,44 @@
+name: Main Branch CI/CD
+
+on:
+  push:
+    branches: [ main, master ]
+    
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install uv
+          uv pip install --system -e .
+          uv pip install --system ".[dev]" pytest pytest-asyncio pyright
+          
+      - name: Static type checking
+        run: pyright src
+        continue-on-error: true
+        
+      - name: Run tests
+        run: |
+          # Configure Python to find modules in both the workspace root and src directory
+          export PYTHONPATH=$PYTHONPATH:$(pwd):$(pwd)/src
+          # Run Python with debug for imports
+          python -c "import sys; print(sys.path)"
+          pytest tests/ -v
+        
+      - name: Build Docker image
+        run: |
+          docker build -t mcp-remote-macos-use:latest .
+          
+      # Add deployment steps here if needed 

@@ -31,9 +31,10 @@ from src.action_handlers import (
 )
 
 # Patch paths - the key insight is that we need to patch where the object is USED, not where it's defined
-# In action_handlers.py, the import is "from vnc_client import VNCClient"
+# In action_handlers.py, the import is "from src.vnc_client import VNCClient, capture_vnc_screen"
 ACTION_HANDLERS_PATH = 'src.action_handlers'
-VNC_CLIENT_PATH = 'src.action_handlers.VNCClient'  # This is the critical part - patch where it's used
+VNC_CLIENT_PATH = 'src.action_handlers.VNCClient'  # Need to patch where it's used
+CAPTURE_VNC_SCREEN_PATH = 'src.action_handlers.capture_vnc_screen'  # Need to patch where it's used
 
 # Check which functions are async
 IS_GET_SCREEN_ASYNC = inspect.iscoroutinefunction(handle_remote_macos_get_screen)
@@ -65,7 +66,7 @@ def mock_env_vars():
         yield
 
 @pytest.mark.asyncio
-@patch(f'{ACTION_HANDLERS_PATH}.capture_vnc_screen', new_callable=AsyncMock)
+@patch(CAPTURE_VNC_SCREEN_PATH, new_callable=AsyncMock)
 async def test_handle_remote_macos_get_screen_success(mock_capture_vnc_screen, mock_env_vars):
     """Test successful screen capture handling."""
     # Arrange
@@ -96,7 +97,7 @@ async def test_handle_remote_macos_get_screen_success(mock_capture_vnc_screen, m
     )
 
 @pytest.mark.asyncio
-@patch(f'{ACTION_HANDLERS_PATH}.capture_vnc_screen', new_callable=AsyncMock)
+@patch(CAPTURE_VNC_SCREEN_PATH, new_callable=AsyncMock)
 async def test_handle_remote_macos_get_screen_failure(mock_capture_vnc_screen, mock_env_vars):
     """Test failed screen capture handling."""
     # Arrange
