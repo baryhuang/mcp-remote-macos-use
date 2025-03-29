@@ -30,7 +30,12 @@ jobs:
         continue-on-error: true
         
       - name: Run tests
-        run: pytest tests/ -v
+        run: |
+          # Configure Python to find modules in both the workspace root and src directory
+          export PYTHONPATH=$PYTHONPATH:$(pwd):$(pwd)/src
+          # Run Python with debug for imports
+          python -c "import sys; print(sys.path)"
+          pytest tests/ -v
         
       - name: Build Docker image
         run: |
