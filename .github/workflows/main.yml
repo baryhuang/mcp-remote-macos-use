@@ -31,12 +31,10 @@ jobs:
         
       - name: Run tests
         run: |
-          # Configure Python to find modules in both the workspace root and src directory
-          export PYTHONPATH=$PYTHONPATH:$(pwd):$(pwd)/src
           # Explicitly set CI environment variable
           export CI=true
-          # Run tests with specific flags to help with asyncio in CI
-          python -m pytest tests/ -v -s --no-header --tb=native
+          # Run tests with specific flags
+          python -m pytest -v -s
         continue-on-error: true
         
       - name: Build Docker image
