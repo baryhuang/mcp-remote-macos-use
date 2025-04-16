@@ -13,6 +13,7 @@ import os
 from base64 import b64encode
 from datetime import datetime
 import sys
+import paramiko  # Add paramiko import for SSH
 
 # Import MCP server libraries
 from mcp.server.models import InitializationOptions
@@ -21,8 +22,7 @@ from mcp.server import NotificationOptions, Server
 import mcp.server.stdio
 
 # Import LiveKit
-from livekit import api
-from .livekit_handler import LiveKitHandler
+from .livekit_client import LiveKitClient
 
 # Import VNC client functionality from the src directory
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -58,8 +58,9 @@ VNC_ENCRYPTION = os.environ.get('VNC_ENCRYPTION', 'prefer_on')
 
 # LiveKit configuration
 LIVEKIT_URL = os.environ.get('LIVEKIT_URL', '')
-LIVEKIT_API_KEY = os.environ.get('LIVEKIT_API_KEY', '')
-LIVEKIT_API_SECRET = os.environ.get('LIVEKIT_API_SECRET', '')
+
+# Token file location on the remote Mac
+TOKEN_FILE_PATH = "~/mcp_tokens/current_session.json"
 
 # Log environment variable status (without exposing actual values)
 logger.info(f"MACOS_HOST from environment: {'Set' if MACOS_HOST else 'Not set'}")
@@ -68,8 +69,6 @@ logger.info(f"MACOS_USERNAME from environment: {'Set' if MACOS_USERNAME else 'No
 logger.info(f"MACOS_PASSWORD from environment: {'Set' if MACOS_PASSWORD else 'Not set (Required)'}")
 logger.info(f"VNC_ENCRYPTION from environment: {VNC_ENCRYPTION}")
 logger.info(f"LIVEKIT_URL from environment: {'Set' if LIVEKIT_URL else 'Not set'}")
-logger.info(f"LIVEKIT_API_KEY from environment: {'Set' if LIVEKIT_API_KEY else 'Not set'}")
-logger.info(f"LIVEKIT_API_SECRET from environment: {'Set' if LIVEKIT_API_SECRET else 'Not set'}")
 
 # Validate required environment variables
 if not MACOS_HOST:
@@ -81,31 +80,88 @@ if not MACOS_PASSWORD:
     raise ValueError("MACOS_PASSWORD environment variable is required but not set")
 
 
+def get_token_from_remote_mac() -> Optional[Dict]:
+    """Retrieve token information from the remote Mac via SSH"""
+    try:
+        logger.info(f"Retrieving token from remote Mac at {MACOS_HOST}")
+        
+        # Set up SSH client
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        
+        # Connect to the remote Mac
+        client.connect(
+            hostname=MACOS_HOST,
+            username=MACOS_USERNAME,
+            password=MACOS_PASSWORD,
+            port=22  # Default SSH port
+        )
+        
+        # Execute command to read the token file
+        # Use the ~ directly in the SSH command so it's expanded on the remote system
+        cmd = f"cat {TOKEN_FILE_PATH}"
+        _, stdout, stderr = client.exec_command(cmd)
+        
+        # Check for errors
+        error = stderr.read().decode().strip()
+        if error:
+            logger.error(f"Error reading token file: {error}")
+            client.close()
+            return None
+        
+        # Read and parse token data
+        token_data = stdout.read().decode().strip()
+        if not token_data:
+            logger.error("Token file is empty or does not exist")
+            client.close()
+            return None
+        
+        # Parse JSON data
+        token_info = json.loads(token_data)
+        logger.info(f"Successfully retrieved token for room: {token_info.get('room_name')}")
+        
+        # Close connection
+        client.close()
+        
+        return token_info
+    
+    except Exception as e:
+        logger.error(f"Failed to retrieve token from remote Mac: {str(e)}")
+        return None
+
+
 async def main():
     """Run the Remote MacOS MCP server."""
     logger.info("Remote MacOS computer use server starting")
 
     # Initialize LiveKit handler if environment variables are set
-    livekit_handler = None
-    if all([LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET]):
-        livekit_handler = LiveKitHandler()
-
-        # Generate access token for the room
-        token = api.AccessToken() \
-            .with_identity("remote-macos-bot") \
-            .with_name("Remote MacOS Bot") \
-            .with_grants(api.VideoGrants(
-                room_join=True,
-                room="remote-macos-room",
-            )).to_jwt()
-
-        # Start LiveKit connection
-        success = await livekit_handler.start("remote-macos-room", token)
-        if success:
-            logger.info("LiveKit connection established")
+    livekit_client = None
+    if LIVEKIT_URL:
+        livekit_client = LiveKitClient()
+        
+        # Try to get token from the remote Mac
+        token_info = get_token_from_remote_mac()
+        
+        if token_info:
+            # Use the token information retrieved from the remote Mac
+            room_name = token_info.get("room_name")
+            server_token = token_info.get("server_token")
+            server_url = token_info.get("server_url", LIVEKIT_URL)
+            
+            logger.info(f"Using retrieved token information for room: {room_name}")
+            
+            # Start LiveKit connection with the retrieved token
+            success = await livekit_client.start(room_name, server_token)
+            if success:
+                logger.info(f"LiveKit connection established to room: {room_name}")
+            else:
+                logger.warning("Failed to establish LiveKit connection with retrieved token")
+                livekit_client = None
         else:
-            logger.warning("Failed to establish LiveKit connection")
-            livekit_handler = None
+            # No token could be retrieved from remote Mac
+            logger.warning("Failed to retrieve token from remote Mac")
+            logger.info("LiveKit connection will not be established - tokens must be generated by the remote Mac")
+            livekit_client = None
 
     # Validate required environment variables
     if not MACOS_HOST:
@@ -132,7 +188,7 @@ async def main():
         return [
             types.Tool(
                 name="remote_macos_get_screen",
-                description="Connect to a remote MacOs machine and get a screenshot of the remote desktop. Uses environment variables for connection details.",
+                description="Connect to a remote MacOs machine and get a full screenshot of the remote desktop.",
                 inputSchema={
                     "type": "object",
                     "properties": {}
@@ -140,7 +196,7 @@ async def main():
             ),
             types.Tool(
                 name="remote_macos_mouse_scroll",
-                description="Perform a mouse scroll at specified coordinates on a remote MacOs machine, with automatic coordinate scaling. Uses environment variables for connection details.",
+                description="Perform a mouse scroll at specified coordinates on a remote MacOs machine, with automatic coordinate scaling.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -160,7 +216,7 @@ async def main():
             ),
             types.Tool(
                 name="remote_macos_send_keys",
-                description="Send keyboard input to a remote MacOs machine. Uses environment variables for connection details.",
+                description="Send keyboard input to a remote MacOs machine.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -173,7 +229,7 @@ async def main():
             ),
             types.Tool(
                 name="remote_macos_mouse_move",
-                description="Move the mouse cursor to specified coordinates on a remote MacOs machine, with automatic coordinate scaling. Uses environment variables for connection details.",
+                description="Move the mouse cursor to specified coordinates on a remote MacOs machine, with automatic coordinate scaling.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -187,7 +243,7 @@ async def main():
             ),
             types.Tool(
                 name="remote_macos_mouse_click",
-                description="Perform a mouse click at specified coordinates on a remote MacOs machine, with automatic coordinate scaling. Uses environment variables for connection details.",
+                description="Perform a mouse click at specified coordinates on a remote MacOs machine, with automatic coordinate scaling.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -202,7 +258,7 @@ async def main():
             ),
             types.Tool(
                 name="remote_macos_mouse_double_click",
-                description="Perform a mouse double-click at specified coordinates on a remote MacOs machine, with automatic coordinate scaling. Uses environment variables for connection details.",
+                description="Perform a mouse double-click at specified coordinates on a remote MacOs machine, with automatic coordinate scaling.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -260,7 +316,7 @@ async def main():
                 arguments = {}
 
             if name == "remote_macos_get_screen":
-                return await handle_remote_macos_get_screen(arguments)
+                return await handle_remote_macos_get_screen(arguments, livekit_client)
 
             elif name == "remote_macos_mouse_scroll":
                 return handle_remote_macos_mouse_scroll(arguments)
@@ -306,8 +362,8 @@ async def main():
                 ),
             )
         finally:
-            if livekit_handler:
-                await livekit_handler.stop()
+            if livekit_client:
+                await livekit_client.stop()
 
 if __name__ == "__main__":
     # Load environment variables from .env file if it exists

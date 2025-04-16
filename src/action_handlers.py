@@ -5,6 +5,8 @@ import os
 import sys
 import subprocess
 import time
+import json
+from datetime import datetime
 
 import mcp.types as types
 # Import vnc_client from the current directory
@@ -25,6 +27,14 @@ MACOS_USERNAME = os.environ.get('MACOS_USERNAME', '')
 MACOS_PASSWORD = os.environ.get('MACOS_PASSWORD', '')
 VNC_ENCRYPTION = os.environ.get('VNC_ENCRYPTION', 'prefer_on')
 
+# Create an audit log for tracking actions
+# This will store entries with timestamps, action name, and parameters
+ACTION_AUDIT_LOG = []
+# Maximum number of audit log entries to keep
+MAX_AUDIT_LOG_ENTRIES = 100
+# Last action timestamp
+LAST_ACTION_TIMESTAMP = 0
+
 # Log environment variable status (without exposing actual values)
 logger.info(f"MACOS_HOST from environment: {'Set' if MACOS_HOST else 'Not set'}")
 logger.info(f"MACOS_PORT from environment: {MACOS_PORT}")
@@ -40,44 +50,175 @@ if not MACOS_PASSWORD:
     logger.warning("MACOS_PASSWORD environment variable is not set")
 
 
-async def handle_remote_macos_get_screen(arguments: dict[str, Any]) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
-    """Connect to a remote MacOs machine and get a screenshot of the remote desktop."""
-    # Use environment variables
-    host = MACOS_HOST
-    port = MACOS_PORT
-    password = MACOS_PASSWORD
-    username = MACOS_USERNAME
-    encryption = VNC_ENCRYPTION
+def log_action(action_name: str, arguments: Dict[str, Any]) -> None:
+    """Add an entry to the audit log for an action"""
+    global LAST_ACTION_TIMESTAMP
+    
+    # Create a sanitized copy of the arguments for logging
+    # Remove any sensitive information like passwords
+    safe_args = {k: v for k, v in arguments.items() if k not in ('password', 'token')}
+    
+    timestamp = time.time()
+    LAST_ACTION_TIMESTAMP = timestamp
+    
+    # Create an audit log entry
+    entry = {
+        "timestamp": timestamp,
+        "iso_time": datetime.fromtimestamp(timestamp).isoformat(),
+        "action": action_name,
+        "arguments": safe_args
+    }
+    
+    # Add to audit log
+    ACTION_AUDIT_LOG.append(entry)
+    
+    # Trim audit log if it's too large
+    if len(ACTION_AUDIT_LOG) > MAX_AUDIT_LOG_ENTRIES:
+        ACTION_AUDIT_LOG.pop(0)
+    
+    logger.info(f"Action logged: {action_name} with arguments: {safe_args}")
 
-    # Capture screen using helper method
-    success, screen_data, error_message, dimensions = await capture_vnc_screen(
-        host=host, port=port, password=password, username=username, encryption=encryption
-    )
 
-    if not success:
-        return [types.TextContent(type="text", text=error_message)]
-
-    # Encode image in base64
-    base64_data = base64.b64encode(screen_data).decode('utf-8')
-
-    # Return image content with dimensions
-    width, height = dimensions
-    return [
-        types.ImageContent(
-            type="image",
-            data=base64_data,
-            mimeType="image/png",
-            alt_text=f"Screenshot from remote MacOs machine at {host}:{port}"
-        ),
-        types.TextContent(
+async def handle_remote_macos_get_screen(arguments: dict[str, Any], livekit_client=None) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
+    """Get the last screen image from LiveKit client's message buffer."""
+    # Log this action
+    # log_action("remote_macos_get_screen", arguments)
+    
+    if livekit_client is None:
+        return [types.TextContent(
             type="text",
-            text=f"Image dimensions: {width}x{height}"
-        )
+            text="Error: LiveKit client is not available. Make sure LiveKit is properly configured."
+        )]
+    
+    # Try to get screen captures specifically first
+    if hasattr(livekit_client, 'get_screen_captures'):
+        screen_captures = livekit_client.get_screen_captures()
+        if screen_captures:
+            # Get the most recent screen capture
+            latest_capture = max(screen_captures, key=lambda x: x["timestamp"])
+            if "screen_path" in latest_capture:
+                # We have a file path to a saved image
+                img_path = latest_capture["screen_path"]
+                if os.path.exists(img_path):
+                    with open(img_path, "rb") as f:
+                        image_data = f.read()
+                    
+                    # Encode to base64
+                    base64_data = base64.b64encode(image_data).decode('utf-8')
+                    
+                    # Get dimensions from the message if available, otherwise use default
+                    dimensions = latest_capture.get("message", {}).get("content", {}).get("dimensions", {})
+                    width = dimensions.get("width", 1366)
+                    height = dimensions.get("height", 768)
+                    
+                    # Return image content with dimensions
+                    return [
+                        types.ImageContent(
+                            type="image",
+                            data=base64_data,
+                            mimeType="image/png",
+                            alt_text=f"Last screenshot from remote MacOs machine"
+                        ),
+                        types.TextContent(
+                            type="text",
+                            text=f"Image dimensions: {width}x{height}"
+                        )
+                    ]
+    
+    # Fall back to searching the full message history
+    message_history = livekit_client.get_message_history()
+    
+    # First, look for screen update messages with file paths
+    file_messages = [
+        msg for msg in message_history 
+        if msg.get("message", {}).get("type") == MESSAGE_TYPE_SCREEN_UPDATE and 
+        msg.get("message", {}).get("content", {}).get("file_path")
     ]
+    
+    if file_messages:
+        # Get the latest file message
+        latest_file_message = max(file_messages, key=lambda x: x["timestamp"])
+        img_path = latest_file_message["message"]["content"]["file_path"]
+        
+        if os.path.exists(img_path):
+            with open(img_path, "rb") as f:
+                image_data = f.read()
+            
+            # Encode to base64
+            base64_data = base64.b64encode(image_data).decode('utf-8')
+            
+            # Get dimensions from the message if available, otherwise use default
+            dimensions = latest_file_message["message"]["content"].get("dimensions", {})
+            width = dimensions.get("width", 1366)
+            height = dimensions.get("height", 768)
+            
+            # Return image content with dimensions
+            return [
+                types.ImageContent(
+                    type="image",
+                    data=base64_data,
+                    mimeType="image/png",
+                    alt_text=f"Last screenshot from remote MacOs machine"
+                ),
+                types.TextContent(
+                    type="text",
+                    text=f"Image dimensions: {width}x{height}"
+                )
+            ]
+    
+    # Fall back to looking for the old format with base64-encoded images
+    image_messages = [
+        msg for msg in message_history 
+        if (msg.get("message", {}).get("type") == "result" or 
+            msg.get("message", {}).get("type") == MESSAGE_TYPE_SCREEN_UPDATE) and 
+        msg.get("message", {}).get("content", {}).get("image_data")
+    ]
+    
+    if not image_messages and not file_messages:
+        return [types.TextContent(
+            type="text",
+            text="No screen images found in message history. Try refreshing or waiting for updates."
+        )]
+    
+    # Get the latest image message if we have one
+    if image_messages:
+        latest_image_message = max(image_messages, key=lambda x: x["timestamp"])
+        image_data = latest_image_message["message"]["content"]["image_data"]
+        
+        # Get dimensions from the message if available
+        dimensions = latest_image_message["message"]["content"].get("dimensions", {})
+        width = dimensions.get("width", 0)
+        height = dimensions.get("height", 0)
+        
+        # Assume the image data is already in base64 format
+        base64_data = image_data
+        
+        # Return image content with dimensions
+        return [
+            types.ImageContent(
+                type="image",
+                data=base64_data,
+                mimeType="image/png",
+                alt_text=f"Last screenshot from remote MacOs machine"
+            ),
+            types.TextContent(
+                type="text",
+                text=f"Image dimensions: {width}x{height}"
+            )
+        ]
+    
+    # If we reach here, we couldn't find any usable screen captures
+    return [types.TextContent(
+        type="text",
+        text="No usable screen captures found in message history. Try refreshing or waiting for updates."
+    )]
 
 
 def handle_remote_macos_mouse_scroll(arguments: dict[str, Any]) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
     """Perform a mouse scroll action on a remote MacOs machine."""
+    # Log this action
+    log_action("remote_macos_mouse_scroll", arguments)
+    
     # Use environment variables
     host = MACOS_HOST
     port = MACOS_PORT
@@ -155,6 +296,9 @@ Scale factors: {scale_factors['x']:.4f}x, {scale_factors['y']:.4f}y"""
 
 def handle_remote_macos_mouse_click(arguments: dict[str, Any]) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
     """Perform a mouse click action on a remote MacOs machine."""
+    # Log this action
+    log_action("remote_macos_mouse_click", arguments)
+    
     # Use environment variables
     host = MACOS_HOST
     port = MACOS_PORT
@@ -221,6 +365,9 @@ Scale factors: {scale_factors['x']:.4f}x, {scale_factors['y']:.4f}y"""
 
 def handle_remote_macos_send_keys(arguments: dict[str, Any]) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
     """Send keyboard input to a remote MacOs machine."""
+    # Log this action
+    log_action("remote_macos_send_keys", arguments)
+    
     # Use environment variables
     host = MACOS_HOST
     port = MACOS_PORT
@@ -354,6 +501,9 @@ def handle_remote_macos_send_keys(arguments: dict[str, Any]) -> list[types.TextC
 
 def handle_remote_macos_mouse_double_click(arguments: dict[str, Any]) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
     """Perform a mouse double-click action on a remote MacOs machine."""
+    # Log this action
+    log_action("remote_macos_mouse_double_click", arguments)
+    
     # Use environment variables
     host = MACOS_HOST
     port = MACOS_PORT
@@ -419,7 +569,10 @@ Scale factors: {scale_factors['x']:.4f}x, {scale_factors['y']:.4f}y"""
 
 
 def handle_remote_macos_mouse_move(arguments: dict[str, Any]) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
-    """Move the mouse cursor on a remote MacOs machine."""
+    """Move the mouse cursor to specified coordinates on a remote MacOs machine."""
+    # Log this action
+    log_action("remote_macos_mouse_move", arguments)
+    
     # Use environment variables
     host = MACOS_HOST
     port = MACOS_PORT
@@ -484,16 +637,10 @@ Scale factors: {scale_factors['x']:.4f}x, {scale_factors['y']:.4f}y"""
 
 
 def handle_remote_macos_open_application(arguments: dict[str, Any]) -> List[types.TextContent]:
-    """
-    Opens or activates an application on the remote MacOS machine using VNC.
-
-    Args:
-        arguments: Dictionary containing:
-            - identifier: App name, path, or bundle ID
-
-    Returns:
-        List containing a TextContent with the result
-    """
+    """Opens/activates an application on remote MacOS and returns its PID for further interactions."""
+    # Log this action
+    log_action("remote_macos_open_application", arguments)
+    
     # Use environment variables
     host = MACOS_HOST
     port = MACOS_PORT
@@ -557,7 +704,10 @@ def handle_remote_macos_open_application(arguments: dict[str, Any]) -> List[type
 
 
 def handle_remote_macos_mouse_drag_n_drop(arguments: dict[str, Any]) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
-    """Perform a mouse drag operation on a remote MacOs machine."""
+    """Perform a mouse drag operation from start point and drop to end point on a remote MacOs machine."""
+    # Log this action
+    log_action("remote_macos_mouse_drag_n_drop", arguments)
+    
     # Use environment variables
     host = MACOS_HOST
     port = MACOS_PORT
@@ -656,3 +806,75 @@ Delay: {delay_ms}ms"""
     finally:
         # Close VNC connection
         vnc.close()
+
+
+def handle_remote_macos_get_screen_update(arguments: dict[str, Any], livekit_client=None) -> list[types.TextContent]:
+    """Returns the consolidated list of action logs and screen updates from LiveKit client."""
+    max_entries = int(arguments.get("max_entries", 10))
+    
+    if livekit_client is None:
+        return [types.TextContent(
+            type="text",
+            text="Error: LiveKit client is not available. Make sure LiveKit is properly configured."
+        )]
+    
+    # Get message history from LiveKit client
+    message_history = livekit_client.get_message_history()
+    
+    # Get recent audit log entries
+    recent_audit_log = ACTION_AUDIT_LOG.copy()
+    
+    # Merge the audit log with screen update messages
+    consolidated_list = []
+    
+    # Add all audit log entries
+    for entry in recent_audit_log:
+        consolidated_list.append({
+            "type": "action",
+            "timestamp": entry["timestamp"],
+            "iso_time": entry["iso_time"],
+            "action": entry["action"],
+            "arguments": entry["arguments"]
+        })
+    
+    # Add all LiveKit message history
+    for message in message_history:
+        consolidated_list.append({
+            "type": "screen_update",
+            "timestamp": message["timestamp"],
+            "direction": message["direction"],
+            "participant": message["participant"],
+            "message": message["message"]
+        })
+    
+    # Sort the consolidated list by timestamp
+    consolidated_list.sort(key=lambda x: x["timestamp"])
+    
+    # Limit to the most recent entries
+    recent_list = consolidated_list[-max_entries:] if consolidated_list else []
+    
+    if not recent_list:
+        return [types.TextContent(
+            type="text",
+            text="No history available. Keep calling this tool to wait for updates."
+        )]
+    
+    # Check if there's been a screen update since the last action
+    should_wait = False
+    if ACTION_AUDIT_LOG and message_history:
+        last_action_time = LAST_ACTION_TIMESTAMP
+        last_message_time = max(m["timestamp"] for m in message_history) if message_history else 0
+        
+        # If the last action is more recent than the last screen update, suggest waiting
+        if last_action_time > last_message_time:
+            should_wait = True
+    
+    # Format the consolidated list for display
+    formatted_list = json.dumps(recent_list, indent=2)
+    
+    wait_message = "\n\nIMPORTANT: The last action has not yet resulted in a screen update. Please wait 1 second and try again." if should_wait else ""
+    
+    return [types.TextContent(
+        type="text",
+        text=f"Consolidated action and screen update history (last {len(recent_list)} of {len(consolidated_list)} entries):\n{formatted_list}{wait_message}"
+    )]

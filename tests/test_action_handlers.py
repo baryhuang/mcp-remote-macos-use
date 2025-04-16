@@ -5,6 +5,9 @@ import socket
 from unittest.mock import AsyncMock, patch, MagicMock, create_autospec, PropertyMock
 from typing import Tuple, Optional, Dict, Any
 import inspect
+import time
+from unittest.mock import mock_open
+import base64
 
 # Add the source directory to the path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -28,6 +31,9 @@ from src.action_handlers import (
     handle_remote_macos_mouse_double_click,
     handle_remote_macos_mouse_move,
     handle_remote_macos_send_keys,
+    handle_remote_macos_get_screen_update,
+    handle_remote_macos_open_application,
+    handle_remote_macos_mouse_drag_n_drop,
 )
 
 # Patch paths - the key insight is that we need to patch where the object is USED, not where it's defined
@@ -35,6 +41,13 @@ from src.action_handlers import (
 ACTION_HANDLERS_PATH = 'src.action_handlers'
 VNC_CLIENT_PATH = 'src.action_handlers.VNCClient'  # Need to patch where it's used
 CAPTURE_VNC_SCREEN_PATH = 'src.action_handlers.capture_vnc_screen'  # Need to patch where it's used
+
+# Constants for testing
+TEST_HOST = 'test-host'
+TEST_PORT = 5900
+TEST_USERNAME = 'test-user'
+TEST_PASSWORD = 'test-password'
+MESSAGE_TYPE_SCREEN_UPDATE = "screen_update"
 
 # Check which functions are async
 IS_GET_SCREEN_ASYNC = inspect.iscoroutinefunction(handle_remote_macos_get_screen)
@@ -46,12 +59,6 @@ IS_SEND_KEYS_ASYNC = inspect.iscoroutinefunction(handle_remote_macos_send_keys)
 
 # Use actual MCP types for validation
 import mcp.types as types
-
-# Constants for testing (must match what's in conftest.py)
-TEST_HOST = 'test-host'
-TEST_PORT = 5900
-TEST_USERNAME = 'test-user'
-TEST_PASSWORD = 'test-password'
 
 @pytest.fixture
 def mock_env_vars():
@@ -77,24 +84,39 @@ async def test_handle_remote_macos_get_screen_success(mock_capture_vnc_screen, m
         (1366, 768)             # dimensions
     )
     
-    # Act
-    if IS_GET_SCREEN_ASYNC:
-        result = await handle_remote_macos_get_screen({})
-    else:
-        result = handle_remote_macos_get_screen({})
+    # Create mock LiveKit client
+    mock_livekit_client = MagicMock()
+    
+    # Configure mock LiveKit client to return screen captures
+    screen_capture = {
+        "timestamp": time.time(),
+        "screen_path": "test_screen.png",
+        "message": {
+            "content": {
+                "dimensions": {
+                    "width": 1366,
+                    "height": 768
+                }
+            }
+        }
+    }
+    mock_livekit_client.get_screen_captures.return_value = [screen_capture]
+    
+    # Mock file operations
+    with patch("builtins.open", mock_open(read_data=b'test_image_data')), \
+         patch("os.path.exists", return_value=True):
+        
+        # Act
+        if IS_GET_SCREEN_ASYNC:
+            result = await handle_remote_macos_get_screen({}, mock_livekit_client)
+        else:
+            result = handle_remote_macos_get_screen({}, mock_livekit_client)
     
     # Assert
     assert len(result) == 2
     assert result[0].type == "image"
     assert result[0].mimeType == "image/png"
     assert result[1].text == "Image dimensions: 1366x768"
-    mock_capture_vnc_screen.assert_called_once_with(
-        host=TEST_HOST,
-        port=TEST_PORT,
-        password=TEST_PASSWORD,
-        username=TEST_USERNAME,
-        encryption='prefer_on'
-    )
 
 @pytest.mark.asyncio
 @patch(CAPTURE_VNC_SCREEN_PATH, new_callable=AsyncMock)
@@ -108,17 +130,23 @@ async def test_handle_remote_macos_get_screen_failure(mock_capture_vnc_screen, m
         None                     # dimensions
     )
     
+    # Create mock LiveKit client
+    mock_livekit_client = MagicMock()
+    
+    # Configure mock LiveKit client to return an empty list of screen captures
+    mock_livekit_client.get_screen_captures.return_value = []
+    mock_livekit_client.get_message_history.return_value = []
+    
     # Act
     if IS_GET_SCREEN_ASYNC:
-        result = await handle_remote_macos_get_screen({})
+        result = await handle_remote_macos_get_screen({}, mock_livekit_client)
     else:
-        result = handle_remote_macos_get_screen({})
+        result = handle_remote_macos_get_screen({}, mock_livekit_client)
     
     # Assert
     assert len(result) == 1
     assert result[0].type == "text"
-    assert "Connection failed" in result[0].text
-    mock_capture_vnc_screen.assert_called_once()
+    assert "No screen images found in message history" in result[0].text
 
 @pytest.mark.asyncio
 async def test_handle_remote_macos_mouse_scroll(mock_env_vars):
@@ -378,3 +406,253 @@ async def test_handle_connection_error(mock_env_vars):
         mock_instance.connect.assert_called_once()
         # Note: close() is not called when connection fails because we return early
         # This is correct behavior based on the implementation 
+
+@pytest.mark.asyncio
+async def test_handle_remote_macos_get_screen_update():
+    """Test get screen update function."""
+    # Create mock LiveKit client
+    mock_livekit_client = MagicMock()
+    
+    # Set up mock data
+    message_history = [
+        {
+            "timestamp": 1000,
+            "direction": "incoming",
+            "participant": "test-participant",
+            "message": {
+                "type": MESSAGE_TYPE_SCREEN_UPDATE,
+                "content": {"test": "data"}
+            }
+        }
+    ]
+    mock_livekit_client.get_message_history.return_value = message_history
+    
+    # Create audit log entry
+    action_entry = {
+        "timestamp": 1001,
+        "iso_time": "2023-01-01T00:00:01",
+        "action": "test_action",
+        "arguments": {"arg1": "value1"}
+    }
+    
+    # Mock the global ACTION_AUDIT_LOG
+    with patch("src.action_handlers.ACTION_AUDIT_LOG", [action_entry]), \
+         patch("src.action_handlers.LAST_ACTION_TIMESTAMP", 1001):
+        
+        # Call the function
+        result = handle_remote_macos_get_screen_update({"max_entries": 5}, mock_livekit_client)
+        
+        # Assertions
+        assert len(result) == 1
+        assert result[0].type == "text"
+        assert "Consolidated action and screen update history" in result[0].text
+        assert "test_action" in result[0].text
+        assert "test-participant" in result[0].text
+        assert "IMPORTANT: The last action has not yet resulted in a screen update" in result[0].text
+
+@pytest.mark.asyncio
+async def test_handle_remote_macos_get_screen_update_no_client():
+    """Test get screen update function with no LiveKit client."""
+    # Call the function without a LiveKit client
+    result = handle_remote_macos_get_screen_update({"max_entries": 5})
+    
+    # Assertions
+    assert len(result) == 1
+    assert result[0].type == "text"
+    assert "Error: LiveKit client is not available" in result[0].text 
+
+@pytest.mark.asyncio
+async def test_handle_remote_macos_open_application(mock_env_vars):
+    """Test opening an application on remote macOS."""
+    with patch(VNC_CLIENT_PATH) as MockVNCClass:
+        # Setup mock VNC instance
+        mock_instance = MagicMock()
+        MockVNCClass.return_value = mock_instance
+        
+        # Configure mock behavior
+        mock_instance.connect.return_value = (True, None)
+        mock_instance.send_key_event.return_value = True
+        mock_instance.send_text.return_value = True
+        
+        # Mock the time module
+        with patch('src.action_handlers.time') as mock_time:
+            # Configure mock to maintain its own time value
+            mock_time_value = 100.0
+            def time_side_effect():
+                nonlocal mock_time_value
+                mock_time_value += 0.25
+                return mock_time_value
+            
+            mock_time.time.side_effect = time_side_effect
+            mock_time.sleep.return_value = None  # No-op for sleep
+            
+            # Act
+            result = handle_remote_macos_open_application({
+                "identifier": "TestApp"
+            })
+            
+            # Assert
+            assert len(result) == 1
+            assert result[0].type == "text"
+            assert "Launched application: TestApp" in result[0].text
+            assert "Processing time:" in result[0].text
+            
+            # Verify interaction with VNC client
+            mock_instance.connect.assert_called_once()
+            assert mock_instance.send_key_event.call_count >= 4  # Command+Space press/release and Enter press/release
+            mock_instance.send_text.assert_called_once_with("TestApp")
+            mock_instance.close.assert_called_once()
+            
+            # Verify time.sleep was called twice (once for Spotlight to open, once for app lookup)
+            assert mock_time.sleep.call_count == 2
+
+@pytest.mark.asyncio
+async def test_handle_remote_macos_open_application_connection_error(mock_env_vars):
+    """Test handling connection error when opening an application."""
+    with patch(VNC_CLIENT_PATH) as MockVNCClass:
+        # Setup mock VNC instance
+        mock_instance = MagicMock()
+        MockVNCClass.return_value = mock_instance
+        
+        # Configure mock to simulate connection failure
+        mock_instance.connect.return_value = (False, "Connection failed")
+        
+        # Act
+        result = handle_remote_macos_open_application({
+            "identifier": "TestApp"
+        })
+        
+        # Assert
+        assert len(result) == 1
+        assert result[0].type == "text"
+        assert "Failed to connect" in result[0].text
+        assert "Connection failed" in result[0].text
+        
+        # Verify VNC client was not used after connection failure
+        mock_instance.connect.assert_called_once()
+        mock_instance.send_key_event.assert_not_called()
+        mock_instance.send_text.assert_not_called()
+        mock_instance.close.assert_not_called()
+
+@pytest.mark.asyncio
+async def test_handle_remote_macos_mouse_drag_n_drop(mock_env_vars):
+    """Test mouse drag and drop operation."""
+    with patch(VNC_CLIENT_PATH) as MockVNCClass:
+        # Setup mock VNC instance
+        mock_instance = MagicMock()
+        MockVNCClass.return_value = mock_instance
+        
+        # Configure mock behavior
+        mock_instance.connect.return_value = (True, None)
+        mock_instance.width = 1920
+        mock_instance.height = 1080
+        mock_instance.send_pointer_event.return_value = True
+        
+        # Mock time.sleep to prevent actual waiting in test
+        with patch('src.action_handlers.time.sleep') as mock_sleep:
+            # Act
+            result = handle_remote_macos_mouse_drag_n_drop({
+                "start_x": 100,
+                "start_y": 200,
+                "end_x": 300,
+                "end_y": 400,
+                "source_width": 1366,
+                "source_height": 768,
+                "button": 1,
+                "steps": 5,
+                "delay_ms": 10
+            })
+            
+            # Assert
+            assert len(result) == 1
+            assert result[0].type == "text"
+            assert "Mouse drag (button 1) completed" in result[0].text
+            assert "From source (100, 200) to (300, 400)" in result[0].text
+            
+            # Verify interaction with VNC client
+            mock_instance.connect.assert_called_once()
+            
+            # Should have these calls:
+            # 1. Initial move to start position
+            # 2. Press button at start position
+            # 3. Five steps of movement (pointer events during drag)
+            # 4. Release button at end position
+            assert mock_instance.send_pointer_event.call_count >= 7
+            
+            # Verify sleep was called for each step
+            assert mock_sleep.call_count == 5
+            
+            # Verify connection was closed
+            mock_instance.close.assert_called_once()
+
+@pytest.mark.asyncio
+async def test_handle_remote_macos_mouse_drag_n_drop_connection_error(mock_env_vars):
+    """Test handling connection error in drag and drop operation."""
+    with patch(VNC_CLIENT_PATH) as MockVNCClass:
+        # Setup mock VNC instance
+        mock_instance = MagicMock()
+        MockVNCClass.return_value = mock_instance
+        
+        # Configure mock to simulate connection failure
+        mock_instance.connect.return_value = (False, "Connection failed")
+        
+        # Act
+        result = handle_remote_macos_mouse_drag_n_drop({
+            "start_x": 100,
+            "start_y": 200,
+            "end_x": 300,
+            "end_y": 400
+        })
+        
+        # Assert
+        assert len(result) == 1
+        assert result[0].type == "text"
+        assert "Failed to connect" in result[0].text
+        assert "Connection failed" in result[0].text
+        
+        # Verify VNC client was not used after connection failure
+        mock_instance.connect.assert_called_once()
+        mock_instance.send_pointer_event.assert_not_called()
+        mock_instance.close.assert_not_called()
+
+@pytest.mark.asyncio
+async def test_handle_remote_macos_mouse_drag_n_drop_step_failure(mock_env_vars):
+    """Test handling failure during drag operation."""
+    with patch(VNC_CLIENT_PATH) as MockVNCClass:
+        # Setup mock VNC instance
+        mock_instance = MagicMock()
+        MockVNCClass.return_value = mock_instance
+        
+        # Configure mock behavior
+        mock_instance.connect.return_value = (True, None)
+        mock_instance.width = 1920
+        mock_instance.height = 1080
+        
+        # Configure send_pointer_event to fail on the third step
+        call_count = 0
+        def side_effect(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            # Fail on the third step (after initial move and button press)
+            return call_count <= 2
+        
+        mock_instance.send_pointer_event.side_effect = side_effect
+        
+        # Act
+        result = handle_remote_macos_mouse_drag_n_drop({
+            "start_x": 100,
+            "start_y": 200,
+            "end_x": 300,
+            "end_y": 400,
+            "steps": 5
+        })
+        
+        # Assert
+        assert len(result) == 1
+        assert result[0].type == "text"
+        assert "Failed during drag at step 1" in result[0].text
+        
+        # Verify interaction with VNC client
+        mock_instance.connect.assert_called_once()
+        assert mock_instance.send_pointer_event.call_count == 3  # Initial, button press, first step (fails)
+        mock_instance.close.assert_called_once() 

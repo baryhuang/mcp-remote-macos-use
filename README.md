@@ -144,22 +144,22 @@ The server provides Remote MacOs functionality through MCP tools.
 The server provides the following tools for remote macOS control:
 
 #### remote_macos_get_screen
-Connect to a remote macOS machine and get a screenshot of the remote desktop. Uses environment variables for connection details.
+Connect to a remote macOS machine and get a screenshot of the remote desktop.
 
 #### remote_macos_send_keys
-Send keyboard input to a remote macOS machine. Uses environment variables for connection details.
+Send keyboard input to a remote macOS machine.
 
 #### remote_macos_mouse_move
-Move the mouse cursor to specified coordinates on a remote macOS machine, with automatic coordinate scaling. Uses environment variables for connection details.
+Move the mouse cursor to specified coordinates on a remote macOS machine, with automatic coordinate scaling.
 
 #### remote_macos_mouse_click
-Perform a mouse click at specified coordinates on a remote macOS machine, with automatic coordinate scaling. Uses environment variables for connection details.
+Perform a mouse click at specified coordinates on a remote macOS machine, with automatic coordinate scaling.
 
 #### remote_macos_mouse_double_click
-Perform a mouse double-click at specified coordinates on a remote macOS machine, with automatic coordinate scaling. Uses environment variables for connection details.
+Perform a mouse double-click at specified coordinates on a remote macOS machine, with automatic coordinate scaling.
 
 #### remote_macos_mouse_scroll
-Perform a mouse scroll at specified coordinates on a remote macOS machine, with automatic coordinate scaling. Uses environment variables for connection details.
+Perform a mouse scroll at specified coordinates on a remote macOS machine, with automatic coordinate scaling.
 
 #### remote_macos_open_application
 Opens/activates an application and returns its PID for further interactions.
@@ -193,6 +193,10 @@ Here's the information converted to a markdown table:
 
 Always use secure, authenticated connections when accessing remote remote MacOs machines. This tool should only be used with servers you trust and have permission to access.
 
+# MacOs Agent Client
+
+A lightweight agent that connects to LiveKit rooms for remote macOS control. Features our proprietary "keep_eyes_open" system that significantly enhances responsiveness and performance by maintaining continuous environment awareness without polling overhead. This allows for near real-time command execution and feedback through efficient bi-directional data channels.
+
 ## License
 
-See the LICENSE file for details. 
+[MIT](LICENSE) 
