@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/baryhuang-mcp-remote-macos-use-badge.png)](https://mseep.ai/app/baryhuang-mcp-remote-macos-use)
+
 # MCP Server - Remote MacOs Use
 **The first open-source MCP server that enables AI to fully control remote macOS systems.**
 
